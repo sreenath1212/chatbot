@@ -1,104 +1,93 @@
 import streamlit as st
 import os
+import requests
 import pandas as pd
 
-from langchain_community.llms import WatsonxLLM  
 
+# Load environment variables
 
+groq_api_key = st.secrets["GROQ_API_KEY"]
 
-# Watsonx credentials
-api_key = st.secrets["WATSONX_API_KEY"]
-url = st.secrets["WATSONX_URL"]
-project_id = st.secrets["WATSONX_PROJECT_ID"]
-
-
-# Streamlit page setup
-st.set_page_config(page_title="Chat with Your Data (Watsonx)", page_icon="🤖")
-st.title("🤖 Chat with Your Data - Powered by Watsonx")
-
-# Safety check for missing environment variables
-if not api_key or not url or not project_id:
-    st.error(
-        "Missing Watsonx credentials. Please check your `.env` file. "
-        "Required variables: WATSONX_API_KEY, WATSONX_URL, WATSONX_PROJECT_ID."
-    )
+if not groq_api_key:
+    st.error("Missing GROQ_API_KEY in .env")
     st.stop()
 
-# Try to create the LLM instance with error handling
+# Streamlit setup
+st.set_page_config(page_title="College Info Assistant", page_icon="🎓")
+st.title("🎓 College Info Assistant (Groq-powered)")
+
+# Load CSV data
+@st.cache_data
+def load_college_data(path):
+    df = pd.read_csv(path)
+    return df
+
+csv_file_path = "college_info.csv"
 try:
-    llm = WatsonxLLM(
-        model_id="meta-llama/llama-3-1-8b-instruct",
-        url=url,
-        apikey=api_key,
-        project_id=project_id,
-        params={
-            "decoding_method": "greedy",
-            "max_new_tokens": 2048,
-            "min_new_tokens": 1,
-            "stop_sequences": ["</s>", "<|endoftext|>"],
-            "temperature": 0.7
-        }
+    college_df = load_college_data(csv_file_path)
+    college_data_text = college_df.to_string(index=False)
+except Exception as e:
+    st.error(f"Error reading CSV: {e}")
+    st.stop()
+
+# Function to call Groq
+def call_groq_with_context(user_prompt, context):
+    headers = {
+        "Authorization": f"Bearer {groq_api_key}",
+        "Content-Type": "application/json"
+    }
+
+    system_msg = (
+        "You are a helpful college information assistant. "
+        "Answer questions based only on the data provided below:\n\n"
+        f"{context[:12000]}\n\n"  # Avoid overly large context
+        "If you don’t know the answer, say 'I don’t know based on the data provided.'"
     )
-except Exception as e:
-    st.error(f"Failed to initialize Watsonx LLM: {e}")
-    st.stop()
 
-# Load the CSV file as a dataframe
-csv_path = "college_info.csv"  # Adjust if you move the file elsewhere
-try:
-    df = pd.read_csv(csv_path)
-    data_context = df.to_string(index=False)
-except Exception as e:
-    st.error(f"Error loading CSV file: {e}")
-    st.stop()
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 10000
+    }
 
-# Session state for chat messages
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=data
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+# Chat state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Clear button
-if st.button("🧹 Clear Chat History"):
+# Clear chat
+if st.button("🧹 Clear Chat"):
     st.session_state.messages = []
     st.experimental_rerun()
 
-# Display past messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Show chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# Prompt input
-prompt = st.chat_input("Ask me anything about the data...")
+# Chat input
+prompt = st.chat_input("Ask me anything about the colleges...")
 if prompt:
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Build context-aware prompt
-    system_context = (
-        "You are a helpful assistant. Use the following college data to answer the user's question.\n\n"
-        f"{data_context}\n\n"
-    )
-
-    chat_prompt = system_context
-    for i in range(0, len(st.session_state.messages), 2):
-        user_msg = st.session_state.messages[i]["content"]
-        assistant_msg = st.session_state.messages[i+1]["content"] if i+1 < len(st.session_state.messages) else ""
-        chat_prompt += f"<|user|>\n{user_msg}\n<|assistant|>\n{assistant_msg}\n"
-
-    chat_prompt += f"<|user|>\n{prompt}\n<|assistant|>\n"
-
-    # Get response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            try:
-                response = llm(chat_prompt)
-                if isinstance(response, dict):
-                    response = response.get("generated_text", str(response))
-                elif not isinstance(response, str):
-                    response = str(response)
-            except Exception as e:
-                response = f"❌ Error generating response: {e}"
-
+            response = call_groq_with_context(prompt, college_data_text)
             st.markdown(response)
 
-    # Save response
     st.session_state.messages.append({"role": "assistant", "content": response})
